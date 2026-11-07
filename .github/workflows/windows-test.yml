@@ -36,19 +36,30 @@ jobs:
       - name: Verify Windows x64 build tools
         run: |
           $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Path '.build/reports' -Force | Out-Null
-          $csc = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
-          if (-not (Test-Path -LiteralPath $csc -PathType Leaf)) {
-            throw '.NET Framework x64 C# compiler was not found.'
+          $checkpoint = 'Prepare report directory'
+          try {
+            New-Item -ItemType Directory -Path '.build/reports' -Force | Out-Null
+            $checkpoint = 'Locate .NET Framework compiler'
+            $csc = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+            if (-not (Test-Path -LiteralPath $csc -PathType Leaf)) {
+              throw 'Framework compiler missing.'
+            }
+            $checkpoint = 'Locate MinGW gcc executable'
+            $gcc = (Get-Command gcc.exe -CommandType Application -ErrorAction Stop).Source
+            $checkpoint = 'Execute gcc target query'
+            $target = & $gcc -dumpmachine
+            if ($LASTEXITCODE -ne 0) { throw 'gcc target query failed.' }
+            $target = ($target -join '').Trim()
+            $checkpoint = 'Validate gcc x64 MinGW target'
+            if ($target -notmatch '^x86_64-.*mingw32$') {
+              throw 'gcc does not target Windows x64.'
+            }
+            Write-Host 'Verified .NET Framework and Windows x64 C compilers.'
+          } catch {
+            $kind = $_.Exception.GetType().Name
+            Write-Output "::error title=Build toolchain::$checkpoint failed ($kind)."
+            throw
           }
-          $gcc = (Get-Command gcc.exe -CommandType Application -ErrorAction Stop).Source
-          $target = & $gcc -dumpmachine
-          if ($LASTEXITCODE -ne 0) { throw 'gcc -dumpmachine failed.' }
-          $target = ($target -join '').Trim()
-          if ($target -notmatch '^x86_64-.*mingw32$') {
-            throw "Expected MinGW-w64 x64, received: $target"
-          }
-          Write-Host "Verified .NET Framework compiler and C target: $target"
 
       - name: Run original Windows tests
         run: |
