@@ -23,15 +23,16 @@ jobs:
       - name: Install MinGW-w64 x64 compiler
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           update: true
-          install: mingw-w64-x86_64-gcc
+          install: mingw-w64-ucrt-x86_64-gcc
 
       - name: Expose MinGW-w64 to Windows build scripts
         shell: msys2 {0}
         run: |
           set -euo pipefail
-          cygpath -w /mingw64/bin >> "$(cygpath -u "$GITHUB_PATH")"
+          cygpath -w /ucrt64/bin >> "$(cygpath -u "$GITHUB_PATH")"
+          printf 'DJI_MINGW_GCC=%s\n' "$(cygpath -w /ucrt64/bin/gcc.exe)" >> "$(cygpath -u "$GITHUB_ENV")"
 
       - name: Verify Windows x64 build tools
         run: |
@@ -45,7 +46,10 @@ jobs:
               throw 'Framework compiler missing.'
             }
             $checkpoint = 'Locate MinGW gcc executable'
-            $gcc = (Get-Command gcc.exe -CommandType Application -ErrorAction Stop).Source
+            $gcc = $env:DJI_MINGW_GCC
+            if (-not $gcc -or -not (Test-Path -LiteralPath $gcc -PathType Leaf)) {
+              throw 'Installed MinGW compiler missing.'
+            }
             $checkpoint = 'Execute gcc target query'
             $target = & $gcc -dumpmachine
             if ($LASTEXITCODE -ne 0) { throw 'gcc target query failed.' }
