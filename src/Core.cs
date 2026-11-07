@@ -276,34 +276,78 @@ namespace DjiMicKey {
         [PreserveSig]int GetBuffer(out IntPtr data,out uint frames,out uint flags,out ulong devicePosition,out ulong qpcPosition);
         [PreserveSig]int ReleaseBuffer(uint frames);[PreserveSig]int GetNextPacketSize(out uint frames);
     }
+    static class ReceiverIdentity {
+        public const uint VendorId=0x2CA3;
+        static readonly ushort[] products=new ushort[]{0x4011,0x4015};
+        [DllImport("user32.dll",EntryPoint="GetRawInputDeviceInfoW",SetLastError=true)] static extern uint DeviceInfo(IntPtr device,uint command,IntPtr data,ref uint size);
+        public static bool IsSupported(uint vendorId,uint productId){
+            if(vendorId!=VendorId)return false;
+            foreach(ushort product in products)if(productId==product)return true;
+            return false;
+        }
+        public static bool IsConsumerHid(uint deviceType,uint vendorId,uint productId,ushort usagePage,ushort usage){return deviceType==2&&IsSupported(vendorId,productId)&&usagePage==0x0C&&usage==1;}
+        public static string Format(ushort productId){return VendorId.ToString("X4",CultureInfo.InvariantCulture)+":"+productId.ToString("X4",CultureInfo.InvariantCulture);}
+        public static string SupportedIds {get{List<string> ids=new List<string>();foreach(ushort product in products)ids.Add(Format(product));return String.Join(", ",ids.ToArray());}}
+        public static bool TryMatchPath(string path,out ushort productId){
+            productId=0;const string prefix=@"\\?\HID#";
+            if(path==null||!path.StartsWith(prefix,StringComparison.OrdinalIgnoreCase))return false;
+            // Only the hardware-ID segment identifies the device. The instance
+            // and interface-GUID segments must not supply a missing VID or PID.
+            int end=path.IndexOf('#',prefix.Length);if(end<0)end=path.Length;
+            string[] tokens=path.Substring(prefix.Length,end-prefix.Length).Split('&');
+            bool hasVendor=false,hasProduct=false;ushort vendor=0,product=0;
+            foreach(string token in tokens){
+                if(token.StartsWith("VID_",StringComparison.OrdinalIgnoreCase)){
+                    if(hasVendor||token.Length!=8||!UInt16.TryParse(token.Substring(4),NumberStyles.AllowHexSpecifier,CultureInfo.InvariantCulture,out vendor))return false;
+                    hasVendor=true;
+                }else if(token.StartsWith("PID_",StringComparison.OrdinalIgnoreCase)){
+                    if(hasProduct||token.Length!=8||!UInt16.TryParse(token.Substring(4),NumberStyles.AllowHexSpecifier,CultureInfo.InvariantCulture,out product))return false;
+                    hasProduct=true;
+                }
+            }
+            if(!hasVendor||!hasProduct||!IsSupported(vendor,product))return false;
+            productId=product;return true;
+        }
+        public static bool TryReadConsumer(IntPtr device,out string path,out ushort productId){
+            path="";productId=0;uint length=2048;StringBuilder name=new StringBuilder((int)length);
+            if(Native.GetRawInputDeviceInfo(device,0x20000007,name,ref length)==UInt32.MaxValue)throw new Win32Exception();
+            ushort candidate;if(!TryMatchPath(name.ToString(),out candidate))return false;
+            IntPtr info=Marshal.AllocHGlobal(32);try{
+                Marshal.WriteInt32(info,32);uint size=32;uint result=DeviceInfo(device,0x2000000B,info,ref size);
+                if(result==UInt32.MaxValue)throw new Win32Exception();
+                if(result<24||!IsConsumerHid((uint)Marshal.ReadInt32(info,4),(uint)Marshal.ReadInt32(info,8),(uint)Marshal.ReadInt32(info,12),(ushort)Marshal.ReadInt16(info,20),(ushort)Marshal.ReadInt16(info,22))||Marshal.ReadInt32(info,12)!=candidate)return false;
+            }finally{Marshal.FreeHGlobal(info);}
+            path=name.ToString();productId=candidate;return true;
+        }
+    }
     sealed class DeviceState {
-        public bool Hid; public string EndpointId="",Name="",Error="";
+        public bool Hid; public ushort ProductId; public string EndpointId="",Name="",Error="";
+        public string ReceiverId {get{return Hid?ReceiverIdentity.Format(ProductId):"";}}
         public bool ButtonReady {get{return Hid;}}
         public bool Connected {get{return Hid&&EndpointId.Length>0;}}
     }
     static class DeviceProbe {
         public static DeviceState Scan() {
             DeviceState state=new DeviceState();
-            try { state.Hid=HasDjiHid(); FindCapture(state); }catch(Exception ex){state.Error=Native.Error(ex);}
+            try { state.ProductId=FindDjiHid();state.Hid=state.ProductId!=0; FindCapture(state); }catch(Exception ex){state.Error=Native.Error(ex);}
             return state;
         }
-        static bool HasDjiHid() {
+        static ushort FindDjiHid() {
             uint size=(uint)Marshal.SizeOf(typeof(Native.RawDevice));
             for(int attempt=0;attempt<3;attempt++) {
                 uint count=0;if(Native.GetRawInputDeviceList(IntPtr.Zero,ref count,size)==UInt32.MaxValue)throw new Win32Exception();
-                if(count==0)return false;if(count>4096)throw new InvalidOperationException("输入设备数量异常。");
+                if(count==0)return 0;if(count>4096)throw new InvalidOperationException("输入设备数量异常。");
                 IntPtr memory=Marshal.AllocHGlobal(checked((int)(count*size)));
                 try {
                     uint found=Native.GetRawInputDeviceList(memory,ref count,size);if(found==UInt32.MaxValue)continue;
                     for(int i=0;i<found;i++) {
                         Native.RawDevice device=(Native.RawDevice)Marshal.PtrToStructure(IntPtr.Add(memory,i*(int)size),typeof(Native.RawDevice));
-                        uint chars=1024;StringBuilder name=new StringBuilder((int)chars);
-                        uint result=Native.GetRawInputDeviceInfo(device.handle,0x20000007,name,ref chars);
-                        if(result==UInt32.MaxValue)continue;
-                        string path=name.ToString();
-                        if(path.IndexOf("VID_2CA3",StringComparison.OrdinalIgnoreCase)>=0&&path.IndexOf("PID_4011",StringComparison.OrdinalIgnoreCase)>=0)return true;
+                        if(device.type!=2)continue;
+                        string path;ushort productId;
+                        try{if(ReceiverIdentity.TryReadConsumer(device.handle,out path,out productId))return productId;}
+                        catch(Win32Exception){continue;}
                     }
-                    return false;
+                    return 0;
                 }finally{Marshal.FreeHGlobal(memory);}
             }
             throw new Win32Exception("设备列表正在变化，请稍后刷新。");

@@ -1,0 +1,87 @@
+name: Windows camera receiver test package
+
+on:
+  push:
+    branches:
+      - codex/camera-receiver-4015
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-test:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install MinGW-w64 x64 compiler
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc
+
+      - name: Expose MinGW-w64 to Windows build scripts
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cygpath -w /mingw64/bin >> "$(cygpath -u "$GITHUB_PATH")"
+
+      - name: Verify Windows x64 build tools
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path '.build/reports' -Force | Out-Null
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+          if (-not (Test-Path -LiteralPath $csc -PathType Leaf)) {
+            throw '.NET Framework x64 C# compiler was not found.'
+          }
+          $gcc = (Get-Command gcc.exe -CommandType Application -ErrorAction Stop).Source
+          $target = & $gcc -dumpmachine
+          if ($LASTEXITCODE -ne 0) { throw 'gcc -dumpmachine failed.' }
+          $target = ($target -join '').Trim()
+          if ($target -notmatch '^x86_64-.*mingw32$') {
+            throw "Expected MinGW-w64 x64, received: $target"
+          }
+          Write-Host "Verified .NET Framework compiler and C target: $target"
+
+      - name: Run original Windows tests
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & cmd.exe /d /c Test.cmd
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "Test.cmd failed with exit code $code." }
+
+      - name: Build original portable archive
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & cmd.exe /d /c Release.cmd
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "Release.cmd failed with exit code $code." }
+
+      - name: Validate and name test package
+        id: package
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archives = @(Get-ChildItem -LiteralPath 'dist' -Filter 'DJIMicKey-v*-portable.zip' -File)
+          if ($archives.Count -ne 1) { throw 'Expected exactly one archive from Release.cmd.' }
+          $short = $env:GITHUB_SHA.Substring(0, 7)
+          $name = "DJIMicKey-camera-4015-phase2-$short-win-x64-test"
+          $output = Join-Path $PWD "dist/$name.zip"
+          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          & './scripts/Validate-Portable.ps1' -InputArchive $archives[0].FullName -OutputArchive $output -Commit $env:GITHUB_SHA -BuildRunUrl $runUrl
+          "archive=$output" >> $env:GITHUB_OUTPUT
+          "name=$name" >> $env:GITHUB_OUTPUT
+
+      - name: Upload complete Windows test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+          retention-days: 14

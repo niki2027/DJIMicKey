@@ -10,7 +10,27 @@ namespace DjiMicKey {
     static class SelfTests {
         static int passed; static StringBuilder report;
         static void Check(bool result,string name){if(!result)throw new Exception("FAIL: "+name);passed++;report.AppendLine("PASS: "+name);}
-        public static int Run(string path){report=new StringBuilder();try{
+        static void RunReceiverIdentityChecks(){
+            Check(ReceiverIdentity.IsSupported(0x2CA3,0x4011)&&ReceiverIdentity.IsSupported(0x2CA3,0x4015),"receiver support retains 4011 and adds camera receiver 4015");
+            Check(!ReceiverIdentity.IsSupported(0x1234,0x4015)&&!ReceiverIdentity.IsSupported(0x2CA3,0x9999)&&!ReceiverIdentity.IsSupported(0x12CA3,0x4015),"receiver support rejects other vendors, unknown products and oversized vendor IDs");
+            string[] accepted={@"\\?\HID#VID_2CA3&PID_4011&MI_00",@"\\?\HID#VID_2CA3&PID_4015&MI_00&Col01#test-instance#{test-interface}",@"\\?\hid#vid_2ca3&pid_4015&mi_00&col01#test-instance",@"\\?\HID#PID_4015&VID_2CA3&REV_0100"};
+            ushort[] expected={0x4011,0x4015,0x4015,0x4015};
+            for(int i=0;i<accepted.Length;i++){ushort product;Check(ReceiverIdentity.TryMatchPath(accepted[i],out product)&&product==expected[i],"receiver path fixture "+i+" returns its actual product ID");}
+            string[] rejected={null,"",@"\\?\HID#VID_1234&PID_4015",@"\\?\HID#VID_2CA3&PID_9999",@"\\?\HID#VID_2CA3&PID_40150",@"\\?\HID#VID_2CA30&PID_4015",@"\\?\HID#XVID_2CA3&PID_4015",@"\\?\HID#VID_2CA3&XPID_4015",@"\\?\HID#VID_1234&PID_9999#VID_2CA3&PID_4015",@"\\?\HID#VID_2CA3#PID_4015",@"\\?\HID#PID_4015",@"\\?\HID#VID_2CA3",@"\\?\HID#VID_2CA3&VID_2CA3&PID_4015",@"\\?\HID#VID_2CA3&VID_1234&PID_4015",@"\\?\HID#VID_2CA3&PID_4015&PID_4011",@"\\?\HID#VID_2CA3&PID_4015&PID_4015",@"\\?\USB#VID_2CA3&PID_4015",@"prefix\\?\HID#VID_2CA3&PID_4015",@"\\?\HID#VID_2CA3&PID_40G5"};
+            for(int i=0;i<rejected.Length;i++){ushort product=0xFFFF;Check(!ReceiverIdentity.TryMatchPath(rejected[i],out product)&&product==0,"non-target or malformed receiver path fixture "+i+" is rejected without a stale product ID");}
+            Check(RawControlMapper.IsTargetPath(accepted[0])&&RawControlMapper.IsTargetPath(accepted[1])&&!RawControlMapper.IsTargetPath(rejected[4]),"raw source filtering shares exact new and legacy receiver matching");
+            Check(ReceiverIdentity.IsConsumerHid(2,0x2CA3,0x4011,0x0C,1)&&ReceiverIdentity.IsConsumerHid(2,0x2CA3,0x4015,0x0C,1),"both supported receivers accept their Consumer control collection");
+            Check(!ReceiverIdentity.IsConsumerHid(0,0x2CA3,0x4015,0x0C,1)&&!ReceiverIdentity.IsConsumerHid(1,0x2CA3,0x4015,0x0C,1),"mouse and keyboard sources cannot become receiver HID inputs");
+            Check(!ReceiverIdentity.IsConsumerHid(2,0x2CA3,0x4015,1,1)&&!ReceiverIdentity.IsConsumerHid(2,0x2CA3,0x4015,0x0C,2),"other HID pages and collections cannot become mapping inputs");
+            Check(!ReceiverIdentity.IsConsumerHid(2,0x1234,0x4015,0x0C,1)&&!ReceiverIdentity.IsConsumerHid(2,0x2CA3,0x9999,0x0C,1),"Consumer control collection alone cannot admit an unsupported device");
+            DeviceState noAudio=new DeviceState{Hid=true,ProductId=0x4015};Check(noAudio.ButtonReady&&!noAudio.Connected&&noAudio.ReceiverId=="2CA3:4015","camera receiver identification and button readiness do not require an audio endpoint");
+            DeviceState legacy=new DeviceState{Hid=true,ProductId=0x4011,EndpointId="test-audio-endpoint"};Check(legacy.Connected&&legacy.ReceiverId=="2CA3:4011","legacy receiver preserves readiness and its own product identity");
+            DeviceState audioOnly=new DeviceState{Hid=false,ProductId=0x4015,EndpointId="test-audio-endpoint"};Check(!audioOnly.ButtonReady&&!audioOnly.Connected&&audioOnly.ReceiverId.Length==0,"an audio endpoint without receiver HID cannot report an identified or ready receiver");
+            noAudio.Hid=false;Check(noAudio.ReceiverId.Length==0,"disconnect hides previously detected receiver identity");
+        }
+        public static int RunReceiverIdentity(string path){passed=0;report=new StringBuilder();try{RunReceiverIdentityChecks();report.AppendLine("TOTAL: "+passed+" passed");File.WriteAllText(path,report.ToString(),Encoding.UTF8);return 0;}catch(Exception ex){report.AppendLine(ex.ToString());File.WriteAllText(path,report.ToString(),Encoding.UTF8);return 1;}}
+        public static int Run(string path){passed=0;report=new StringBuilder();try{
+            RunReceiverIdentityChecks();
             Check(IntPtr.Size==8,"64-bit process");Check(Marshal.SizeOf(typeof(Native.Input))==40,"SendInput ABI is 40 bytes");
             Check(Marshal.SizeOf(typeof(Native.Kbd))==24,"keyboard hook ABI is 24 bytes");Check(Marshal.SizeOf(typeof(PropVariant))==24,"PROPVARIANT ABI is 24 bytes");
             ShortcutSpec spec=new ShortcutSpec();Native.Input[] input=spec.BuildInput();Check(input.Length==6,"default shortcut has three presses and three releases");
@@ -54,8 +74,6 @@ namespace DjiMicKey {
             InputTrace trace=new InputTrace();int streamed=0;trace.Entry+=delegate{streamed++;};trace.Add("inactive");trace.Start();for(int i=0;i<300;i++)trace.Add("entry-"+i);Check(streamed==300,"diagnostic events stream to the UI while capture is active");string traceText=trace.Stop();Check(trace.Dropped==44&&traceText.IndexOf("entry-299",StringComparison.Ordinal)>=0&&traceText.IndexOf("entry-0"+Environment.NewLine,StringComparison.Ordinal)<0,"diagnostic buffer is bounded and reports dropped entries");trace.Add("after-stop");Check(trace.Stop().IndexOf("after-stop",StringComparison.Ordinal)<0,"diagnostic capture stops explicitly");trace.Start();trace.Add("restart");Check(trace.Stop().IndexOf("entry-",StringComparison.Ordinal)<0,"new diagnosis resets old capture");
             using(KeyboardMapper healthMapper=new KeyboardMapper()){Check(healthMapper.IsRunning&&healthMapper.ProbeHealth(),"listener health probe is acknowledged and consumed by its native hook");}
             trace.Start();trace.Add("LOWLEVEL media checkpoint");for(int i=0;i<300;i++)trace.Add("RAW packet="+i);Check(trace.Stop().IndexOf("LOWLEVEL media checkpoint",StringComparison.Ordinal)>=0,"raw report bursts preserve key diagnostic decisions");
-            DeviceState noAudio=new DeviceState{Hid=true};Check(noAudio.ButtonReady&&!noAudio.Connected,"button mapping readiness is independent of the audio endpoint");
-            Check(RawControlMapper.IsTargetPath(@"\\?\HID#VID_2CA3&PID_4011&MI_00")&&!RawControlMapper.IsTargetPath(@"\\?\HID#VID_2CA3&PID_9999")&&!RawControlMapper.IsTargetPath(@"\\?\HID#VID_1234&PID_4011"),"raw source requires the supported VID and PID");
             List<byte[]> reports=RawControlMapper.SplitReports(new byte[]{3,0,0,0,2,0,0,0,6,1,0,6,0,0});
             Check(reports.Count==2&&reports[0][1]==1&&reports[1][1]==0,"multi-report RAWHID retains both press and release");
             bool badRaw=false;try{RawControlMapper.SplitReports(new byte[]{255,255,255,255,255,255,255,255});}catch(ArgumentException){badRaw=true;}Check(badRaw,"malformed RAWHID cannot overflow or allocate oversized reports");
@@ -91,7 +109,7 @@ namespace DjiMicKey {
     static class Diagnostics {
         public static int Run(string path){StringBuilder report=new StringBuilder();try{
             report.AppendLine("DJI Mic Key diagnostics");report.AppendLine("UTC: "+DateTime.UtcNow.ToString("o"));
-            DeviceState device=DeviceProbe.Scan();report.AppendLine("DJI USB HID: "+device.Hid);report.AppendLine("Matching capture endpoint: "+device.Name);report.AppendLine("Ready: "+device.Connected);if(device.Error.Length>0)report.AppendLine("Probe error: "+device.Error);
+            DeviceState device=DeviceProbe.Scan();report.AppendLine("DJI USB HID: "+device.Hid);report.AppendLine("Receiver USB ID: "+device.ReceiverId);report.AppendLine("Matching capture endpoint: "+device.Name);report.AppendLine("Ready: "+device.Connected);if(device.Error.Length>0)report.AppendLine("Probe error: "+device.Error);
             if(device.Connected){float peak=0;using(AudioMonitor monitor=new AudioMonitor(device.EndpointId)){for(int i=0;i<15;i++){Thread.Sleep(80);peak=Math.Max(peak,monitor.Poll());}}report.AppendLine("WASAPI shared capture / meter: OK");report.AppendLine("Peak sample: "+peak.ToString("0.000000",CultureInfo.InvariantCulture));}
             report.AppendLine("Working set MiB: "+(Process.GetCurrentProcess().WorkingSet64/1048576.0).ToString("0.0",CultureInfo.InvariantCulture));File.WriteAllText(path,report.ToString(),Encoding.UTF8);return device.Connected?0:2;
         }catch(Exception ex){report.AppendLine(ex.ToString());File.WriteAllText(path,report.ToString(),Encoding.UTF8);return 1;}}
