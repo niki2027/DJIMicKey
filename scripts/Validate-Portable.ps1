@@ -3,7 +3,9 @@ param(
     [Parameter(Mandatory = $true)][string]$InputArchive,
     [Parameter(Mandatory = $true)][string]$OutputArchive,
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-fA-F]{40}$')][string]$Commit,
-    [Parameter(Mandatory = $true)][string]$BuildRunUrl
+    [Parameter(Mandatory = $true)][string]$BuildRunUrl,
+    [ValidateSet('Test', 'Release')][string]$PackageKind = 'Test',
+    [ValidatePattern('^$|^[0-9]+\.[0-9]+\.[0-9]+$')][string]$Version = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,8 +13,12 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $reportDir = Join-Path $repoRoot '.build/reports'
 New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
-$required = @('DJIMicKey.exe', 'DJIMicKey.Shell.dll', 'WINDOWS.md', 'WIN11_TROUBLESHOOTING.md', 'SHELL_VOLUME_FILTER.md', 'VALIDATION.md', 'LICENSE')
-$testReadme = 'READ-ME-FIRST-WINDOWS-TEST.md'
+# Third-party license sources live under licenses/ in the repository and at the
+# archive root in portable packages, alongside the project license and notices.
+$required = @('DJIMicKey.exe', 'DJIMicKey.Shell.dll', 'WINDOWS.md', 'WIN11_TROUBLESHOOTING.md', 'SHELL_VOLUME_FILTER.md', 'VALIDATION.md', 'LICENSE', 'NOTICE.md', 'THIRD_PARTY_NOTICES.md', 'MINGW-W64-COPYING.txt', 'GCC-RUNTIME-EXCEPTION-3.1.txt', 'GPL-3.0.txt')
+$packageReadme = if ($PackageKind -eq 'Release') { 'READ-ME-FIRST.md' } else { 'READ-ME-FIRST-WINDOWS-TEST.md' }
+$readmeSource = if ($PackageKind -eq 'Release') { 'docs/RELEASE.md' } else { 'docs/WINDOWS_TEST_BUILD.md' }
+if ($PackageKind -eq 'Release' -and -not $Version) { throw 'A version is required for a release package.' }
 
 function Assert-X64Pe([byte[]]$Bytes, [string]$Name) {
     if ($Bytes.Length -lt 64 -or $Bytes[0] -ne 0x4D -or $Bytes[1] -ne 0x5A) {
@@ -31,12 +37,12 @@ function Assert-X64Pe([byte[]]$Bytes, [string]$Name) {
     }
 }
 
-function Assert-PortableArchive([string]$Path, [bool]$IncludeTestFiles) {
+function Assert-PortableArchive([string]$Path, [bool]$IncludeBuildInfo) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Missing archive: $Path" }
     $archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
     try {
         $expected = $required
-        if ($IncludeTestFiles) { $expected += @($testReadme, 'BUILD-INFO.txt') }
+        if ($IncludeBuildInfo) { $expected += @($packageReadme, 'BUILD-INFO.txt') }
         $names = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         foreach ($entry in $archive.Entries) {
             if ($entry.FullName -match '[/\\:]' -or $entry.FullName -in @('', '.', '..') -or -not $names.Add($entry.FullName)) {
@@ -69,26 +75,28 @@ function Assert-PortableArchive([string]$Path, [bool]$IncludeTestFiles) {
 
 $inputPath = (Resolve-Path -LiteralPath $InputArchive).Path
 $outputPath = [System.IO.Path]::GetFullPath($OutputArchive)
-if ($inputPath -eq $outputPath) { throw 'Use a separate output path for the test package.' }
+if ($inputPath -eq $outputPath) { throw 'Use a separate output path for the validated package.' }
 $stage = Join-Path $repoRoot ('.build/portable-check-' + [Guid]::NewGuid().ToString('N'))
 try {
-    Assert-PortableArchive -Path $inputPath -IncludeTestFiles $false
+    Assert-PortableArchive -Path $inputPath -IncludeBuildInfo $false
     [System.IO.Compression.ZipFile]::ExtractToDirectory($inputPath, $stage)
-    Copy-Item -LiteralPath (Join-Path $repoRoot 'docs/WINDOWS_TEST_BUILD.md') -Destination (Join-Path $stage $testReadme)
+    Copy-Item -LiteralPath (Join-Path $repoRoot $readmeSource) -Destination (Join-Path $stage $packageReadme)
     $exeHash = (Get-FileHash -LiteralPath (Join-Path $stage 'DJIMicKey.exe') -Algorithm SHA256).Hash
     $dllHash = (Get-FileHash -LiteralPath (Join-Path $stage 'DJIMicKey.Shell.dll') -Algorithm SHA256).Hash
     @(
-        'DJIMicKey camera receiver phase 2 - Windows x64 test package',
+        "DJIMicKey $Version - Windows x64 $PackageKind package",
         "Source commit: $Commit",
         "Windows build and test run: $BuildRunUrl",
-        'Hardware compatibility and ChatGPT response require local verification.',
+        'Windows tests passed for this source commit; see the instructions for the verified hardware configuration.',
         "DJIMicKey.exe SHA256: $exeHash",
         "DJIMicKey.Shell.dll SHA256: $dllHash"
     ) | Set-Content -LiteralPath (Join-Path $stage 'BUILD-INFO.txt') -Encoding utf8
-    Compress-Archive -LiteralPath @(($required + @($testReadme, 'BUILD-INFO.txt')) | ForEach-Object { Join-Path $stage $_ }) -DestinationPath $outputPath -Force
-    Assert-PortableArchive -Path $outputPath -IncludeTestFiles $true
+    Compress-Archive -LiteralPath @(($required + @($packageReadme, 'BUILD-INFO.txt')) | ForEach-Object { Join-Path $stage $_ }) -DestinationPath $outputPath -Force
+    Assert-PortableArchive -Path $outputPath -IncludeBuildInfo $true
     $result = [ordered]@{
         commit = $Commit
+        version = $Version
+        package_kind = $PackageKind
         windows_run = $BuildRunUrl
         archive = [System.IO.Path]::GetFileName($outputPath)
         archive_sha256 = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash
@@ -96,7 +104,7 @@ try {
         dll_sha256 = $dllHash
         pe_machine = '0x8664 (x86-64), EXE and DLL'
         archive_check = 'PASS: required root files, nonempty entries and PE32+ binaries'
-        hardware_validation = 'pending'
+        hardware_validation = 'See the release instructions for the verified configuration; other hardware is not certified.'
     }
     $result | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $reportDir 'portable-validation.json') -Encoding utf8
     Write-Host "Validated Windows test package: $outputPath"

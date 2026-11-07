@@ -1,0 +1,158 @@
+name: Publish Windows release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+
+      - name: Verify release version
+        id: version
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -notmatch '^v([0-9]+\.[0-9]+\.[0-9]+)$') {
+            throw 'Release tags must have the form vMAJOR.MINOR.PATCH.'
+          }
+          $version = $Matches[1]
+          $assembly = Get-Content -LiteralPath 'src/AssemblyInfo.cs' -Raw
+          foreach ($attribute in @('AssemblyVersion', 'AssemblyFileVersion')) {
+            $pattern = '\[assembly:\s*' + $attribute + '\("' + [Regex]::Escape("$version.0") + '"\)\]'
+            if ($assembly -notmatch $pattern) { throw "Release tag and $attribute do not match." }
+          }
+          $releaseScript = Get-Content -LiteralPath 'Release.cmd' -Raw
+          if ($releaseScript -notmatch ('set "DJI_VERSION=' + [Regex]::Escape($version) + '"')) {
+            throw 'Release tag and portable package version do not match.'
+          }
+          if (-not (Test-Path -LiteralPath 'NOTICE.md' -PathType Leaf)) { throw 'Upstream notice is missing.' }
+          "number=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Install MinGW-w64 x64 compiler
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      - name: Expose the installed x64 compiler
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          test -x /ucrt64/bin/gcc.exe
+          cygpath -w /ucrt64/bin >> "$(cygpath -u "$GITHUB_PATH")"
+          printf 'DJI_MINGW_GCC=%s\n' "$(cygpath -w /ucrt64/bin/gcc.exe)" >> "$(cygpath -u "$GITHUB_ENV")"
+
+      - name: Verify Windows x64 build tools
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $checkpoint = 'Locate .NET Framework compiler'
+          try {
+            New-Item -ItemType Directory -Path '.build/reports' -Force | Out-Null
+            $csc = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+            if (-not (Test-Path -LiteralPath $csc -PathType Leaf)) { throw 'Framework compiler missing.' }
+            $checkpoint = 'Locate MinGW gcc executable'
+            $gcc = [string]$env:DJI_MINGW_GCC
+            if (-not $gcc -or -not (Test-Path -LiteralPath $gcc -PathType Leaf)) { throw 'Installed MinGW compiler missing.' }
+            $checkpoint = 'Execute gcc target query'
+            $target = & $gcc -dumpmachine
+            if ($LASTEXITCODE -ne 0) { throw 'gcc target query failed.' }
+            $target = ($target -join '').Trim()
+            $checkpoint = 'Validate gcc x64 MinGW target'
+            if ($target -notmatch '^x86_64-.*mingw32$') { throw 'gcc does not target Windows x64.' }
+            Write-Host 'Verified .NET Framework and Windows x64 C compilers.'
+          } catch {
+            $kind = $_.Exception.GetType().Name
+            Write-Output "::error title=Build toolchain::$checkpoint failed ($kind)."
+            throw
+          }
+
+      - name: Run Windows tests
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & cmd.exe /d /c Test.cmd
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "Test.cmd failed with exit code $code." }
+
+      - name: Build the portable archive
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & cmd.exe /d /c Release.cmd
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "Release.cmd failed with exit code $code." }
+
+      - name: Validate release ZIP and create checksum
+        id: package
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.number }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:RELEASE_VERSION
+          $inputArchive = Join-Path $PWD "dist/DJIMicKey-v$version-portable.zip"
+          $name = "DJIMicKey-v$version-win-x64-portable.zip"
+          $outputArchive = Join-Path $PWD "dist/$name"
+          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          & './scripts/Validate-Portable.ps1' -InputArchive $inputArchive -OutputArchive $outputArchive -Commit $env:GITHUB_SHA -BuildRunUrl $runUrl -PackageKind Release -Version $version
+          $hash = (Get-FileHash -LiteralPath $outputArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksum = "$outputArchive.sha256"
+          "$hash  $name" | Set-Content -LiteralPath $checksum -Encoding ascii
+          "archive=$outputArchive" >> $env:GITHUB_OUTPUT
+          "checksum=$checksum" >> $env:GITHUB_OUTPUT
+
+      - name: Publish the verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_ARCHIVE: ${{ steps.package.outputs.archive }}
+          RELEASE_CHECKSUM: ${{ steps.package.outputs.checksum }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:GITHUB_REF_NAME
+          $existing = & gh release view $tag --json isDraft --jq '.isDraft' 2>$null
+          $viewCode = $LASTEXITCODE
+          if ($viewCode -eq 0) {
+            if (($existing -join '').Trim() -ne 'true') { throw 'This release is already public; it will not be overwritten.' }
+            & gh release edit $tag --title "DJIMicKey $tag" --notes-file 'docs/RELEASE.md'
+            if ($LASTEXITCODE -ne 0) { throw 'Updating the draft release failed.' }
+          } else {
+            & gh release create $tag --verify-tag --draft --title "DJIMicKey $tag" --notes-file 'docs/RELEASE.md'
+            if ($LASTEXITCODE -ne 0) { throw 'Creating the draft release failed.' }
+          }
+          & gh release upload $tag $env:RELEASE_ARCHIVE $env:RELEASE_CHECKSUM --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Uploading the release assets failed.' }
+          $json = & gh release view $tag --json assets,isDraft
+          if ($LASTEXITCODE -ne 0) { throw 'Reading the draft release assets failed.' }
+          $draft = ($json -join "`n") | ConvertFrom-Json
+          if (-not $draft.isDraft -or @($draft.assets).Count -ne 2) { throw 'Unexpected draft release or asset list.' }
+          foreach ($path in @($env:RELEASE_ARCHIVE, $env:RELEASE_CHECKSUM)) {
+            $file = Get-Item -LiteralPath $path
+            $asset = @($draft.assets | Where-Object { $_.name -ceq $file.Name })
+            if ($asset.Count -ne 1 -or $asset[0].size -ne $file.Length -or $file.Length -le 0) {
+              throw 'A release asset is missing, empty or has an unexpected size.'
+            }
+          }
+          & gh release edit $tag --draft=false --prerelease=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Publishing the completed release failed.' }
+          $json = & gh release view $tag --json isDraft,isPrerelease,url
+          if ($LASTEXITCODE -ne 0) { throw 'Verifying the public release failed.' }
+          $published = ($json -join "`n") | ConvertFrom-Json
+          if ($published.isDraft -or $published.isPrerelease) { throw 'The release is not public and stable.' }
+          Write-Output "::notice title=Published release::$($published.url)"

@@ -3,7 +3,11 @@ name: Windows camera receiver test package
 on:
   push:
     branches:
+      - main
       - codex/camera-receiver-4015
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -86,7 +90,7 @@ jobs:
           $archives = @(Get-ChildItem -LiteralPath 'dist' -Filter 'DJIMicKey-v*-portable.zip' -File)
           if ($archives.Count -ne 1) { throw 'Expected exactly one archive from Release.cmd.' }
           $short = $env:GITHUB_SHA.Substring(0, 7)
-          $name = "DJIMicKey-camera-4015-phase2-$short-win-x64-test"
+          $name = "DJIMicKey-camera-4015-$short-win-x64-test"
           $output = Join-Path $PWD "dist/$name.zip"
           $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           & './scripts/Validate-Portable.ps1' -InputArchive $archives[0].FullName -OutputArchive $output -Commit $env:GITHUB_SHA -BuildRunUrl $runUrl

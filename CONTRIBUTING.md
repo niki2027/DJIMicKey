@@ -2,6 +2,10 @@
 
 DJI Mic Key is a small Windows desktop utility built with C# and Windows Forms.
 
+欢迎通过 Issues 或 Pull Requests 提交兼容反馈、修复和文档改进。请说明 Windows 版本、产品级 VID/PID、连接方式、复现步骤和预期结果，分别报告自动测试与真实设备验证。不要附带个人设备采集或私人日志。
+
+This fork is based on [111jc/DJIMicKey](https://github.com/111jc/DJIMicKey). Contributions are distributed under the project's existing MIT license. Preserve [LICENSE](LICENSE), upstream copyright notices and [NOTICE.md](NOTICE.md); describe derived changes without claiming sole authorship of the upstream code.
+
 ## Development
 
 1. Use Windows 10/11 x64 with .NET Framework 4.8 and MinGW-w64 `gcc` on PATH (x64 target).
@@ -25,4 +29,4 @@ No NuGet packages or downloaded runtime are required. GCC builds the user-mode S
 - Test scaling and large text for UI changes. Do not change the developer's real Windows display settings in tests.
 - Startup-registration tests must use an isolated temporary registry key and preserve other values.
 
-Do not commit personal logs, recordings, device identifiers, API keys or generated executables.
+Do not commit personal logs, recordings, settings, API keys, device serial numbers, full device-instance paths or generated executables. Product-level VID/PID values may be included when needed to describe compatibility. Releases must contain only allowlisted program files, necessary instructions, license and minimal build metadata; test reports remain on the build runner. Use synthetic fixtures for regression checks and a generic build identity for release automation.
